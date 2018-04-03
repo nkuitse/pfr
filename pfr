@@ -85,8 +85,9 @@ sub cmd_add_job {
 
 sub cmd_add_records {
     #@ add records [-d DBFILE] [-m INTERVAL] [-i INFILE] PROJECT FILE :: add records
-    my ($commit_interval);
+    my ($first_number, $commit_interval) = (1, undef);
     orient(
+        'n|first-number=i' => \$first_number,
         'm|commit-interval=i' => \$commit_interval,
         'i|input=s' => sub {
             open STDIN, '<', $_[1] or die "open $_[1]: $!";
@@ -96,7 +97,7 @@ sub cmd_add_records {
     my $project = project(shift @ARGV);
     my $file = project_file($project, shift @ARGV);
     db_transact {
-        my $count = db_add_records_to_file($file, \*STDIN, $commit_interval);
+        my $count = db_add_records_to_file($file, \*STDIN, $first_number, $commit_interval);
         print STDERR $plumbing ? "$count\n" : "added records ($count)\n";
     };
 }
@@ -270,9 +271,9 @@ sub db_add_job_to_file {
 }
 
 sub db_add_records_to_file {
-    my ($file, $fh, $commit_interval) = @_;
+    my ($file, $fh, $first_number, $commit_interval) = @_;
     my $fid = $file->{'id'};
-    my $n = 0;
+    my $n = $first_number - 1;
     db_transact {
         local $/ = '';
         while (<$fh>) {
