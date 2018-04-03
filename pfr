@@ -519,15 +519,15 @@ sub props2hash {
 }
 
 sub usage {
-    print STDERR "usage: vbdb COMMAND [ARG...]\n";
+    print STDERR "usage: pfr COMMAND [ARG...]\n";
     exit 1;
 }
 
 sub warning {
-    print STDERR "vbdb: warning: @_\n";
+    print STDERR "pfr: warning: @_\n";
 }
 
 sub fatal {
-    print STDERR "vbdb: @_\n";
+    print STDERR "pfr: @_\n";
     exit 2;
 }
