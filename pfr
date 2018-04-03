@@ -1,0 +1,529 @@
+#!/usr/bin/perl
+
+use strict;
+use warnings;
+
+sub usage;
+sub warning;
+sub fatal;
+
+use DBI;
+use Digest;
+use MARC::Loop qw(marcparse TAG VALREF);
+use Getopt::Long
+    qw(:config posix_default gnu_compat require_order bundling no_ignore_case);
+
+sub db_transact(&);
+sub orient;
+
+my ($dbh, %table, %object);
+my $trxlevel = 0;
+
+@ARGV = qw(shell) if !@ARGV;
+my $cmd = norm(shift @ARGV);
+my $sub = __PACKAGE__->can("cmd_$cmd") || usage;
+$sub->();
+
+# --- Command handlers
+
+sub cmd_init {
+    #@ init DBFILE :: initialize a new database
+    usage if @ARGV != 1;
+    my $db = shift @ARGV;
+    db_connect($db);
+    db_initialize();
+}
+
+sub cmd_add {
+    subcmd();
+}
+
+sub cmd_dump {
+    subcmd();
+}
+
+sub cmd_set {
+    subcmd();
+}
+
+sub cmd_add_project {
+    #@ add project [-d DBFILE] KEY=VALUE... :: add a project
+    orient;
+    usage if @ARGV < 1;
+    my $project = props2hash(@ARGV);
+    $project->{'added'} //= time;
+    db_transact {
+        my $pid = db_add_project($project);
+        print STDERR "added: project $pid\n";
+    };
+}
+
+sub cmd_add_file {
+    #@ add file [-d DBFILE] PROJECT KEY=VALUE... :: add a file to PROJECT
+    orient;
+    usage if @ARGV < 2;
+    my $project = project(shift @ARGV);
+    my $file = props2hash(@ARGV);
+    db_transact {
+        my $fid = db_add_file_to_project($project, $file);
+        print STDERR "added: file $fid\n";
+    };
+}
+
+sub cmd_add_job {
+    #@ add job [-d DBFILE] PROJECT FILE KEY=VALUE... :: add a job
+    orient;
+    usage if @ARGV < 3;
+    my $project = project(shift @ARGV);
+    my $file = file($project, shift @ARGV);
+    my $job = props2hash(@ARGV);
+    db_transact {
+        my $jid = db_add_job_to_file($file, $job);
+        print STDERR "added: job $jid\n";
+    };
+}
+
+sub cmd_add_records {
+    #@ add records [-d DBFILE] [-m INTERVAL] [-i INFILE] PROJECT FILE :: add records
+    my ($commit_interval);
+    orient(
+        'm|commit-interval=i' => \$commit_interval,
+        'i|input=s' => sub {
+            open STDIN, '<', $_[1] or die "open $_[1]: $!";
+        },
+    );
+    usage if @ARGV != 2;
+    my $project = project(shift @ARGV);
+    my $file = file($project, shift @ARGV);
+    db_transact {
+        my $count = db_add_records_to_file($file, \*STDIN, $commit_interval);
+        print STDERR "added records ($count)\n";
+    };
+}
+
+sub cmd_add_matches {
+    #@ add records [-d DBFILE] [-m INTERVAL] [-i INFILE] PROJECT FILE :: add record matches
+    my ($commit_interval);
+    orient(
+        'm|commit-interval=i' => \$commit_interval,
+        'i|input=s' => sub {
+            open STDIN, '<', $_[1] or die "open $_[1]: $!";
+        },
+    );
+    usage if @ARGV != 2;
+    my $project = project(shift @ARGV);
+    my $file = file($project, shift @ARGV);
+    db_transact {
+        my $count = db_add_matches_to_file($file, \*STDIN, $commit_interval);
+        print STDERR "added matches ($count)\n";
+    };
+}
+
+sub cmd_add_results {
+    #@ add results [-d DBFILE] [-m INTERVAL] [-i INFILE] PROJECT FILE JOB :: add job results
+}
+
+sub cmd_dump_project {
+    #@ dump project [-d DBFILE] PROJECT :: dump metadata for a project
+    orient;
+    usage if @ARGV != 1;
+    my $project = project(@ARGV);
+    dump_object('project' => $project);
+}
+
+sub cmd_dump_file {
+    #@ dump project [-d DBFILE] PROJECT FILE :: dump metadata for a file
+    orient;
+    usage if @ARGV != 2;
+    my $project = db_project(shift @ARGV);
+    my $file = file($project, shift @ARGV);
+    dump_object('file' => $file);
+}
+
+# --- Basic object functions
+
+sub object {
+    my ($table, %criteria) = @_;
+    my $key = join("\n", $table, map { "$_:$criteria{$_}" } sort keys %criteria);
+    return $object{$key} ||= sth_unique(db_select($table, %criteria));
+}
+
+sub project {
+    my ($p) = @_;
+    return $p if ref $p;
+    return object('projects', parse_key($p));
+}
+
+sub project_file {
+    my ($p, $f) = @_;
+    return $f if ref $f;
+    my $project = project($p);
+    return object('files', 'project_id' => $project->{'id'}, parse_key($f));
+}
+
+sub project_job {
+    my ($p, $j) = @_;
+    return $j if ref $j;
+    my $project = project($p);
+    return object('jobs', 'project_id' => $project->{'id'}, parse_key($j));
+}
+
+# --- Database functions
+
+sub db_select {
+    my ($table, %arg) = @_;
+    my $sql = "SELECT * FROM $table";
+    my @params;
+    if (%arg) {
+        my @criteria;
+        while (my ($k, $v) = each %arg) {
+            my $op = '=';
+            if ($k =~ s/(<=?|>=?|!?=)$//) {
+                $op = $1;
+            }
+            push @criteria, "$k $op ?";
+            push @params, $v;
+        }
+        $sql .= sprintf ' WHERE %s', join(' AND ', @criteria);
+    }
+    my $sth = $dbh->prepare($sql);
+    $sth->execute(@params);
+    return $sth;
+}
+
+sub sth_unique {
+    my ($sth) = @_;
+    if (wantarray) {
+        my @row = $sth->fetchrow_array;
+        my @more = $sth->fetchrow_array;
+        $sth->finish;
+        die if !@row || @more;
+        return @row;
+    }
+    else {
+        my $row = $sth->fetchrow_hashref;
+        my @more = $sth->fetchrow_array;
+        $sth->finish;
+        die if !$row || @more;
+        return $row;
+    }
+}
+
+sub sth_iter {
+    my $sth = shift;
+    my $sub = pop;
+    my $r = 'HASH';
+    $r = ref $_[0] if @_ == 1;
+    if ($r eq 'HASH') {
+        while (my $row = $sth->fetchrow_hashref) {
+            $sub->($row);
+        }
+    }
+    elsif ($r eq 'ARRAY') {
+        while (my @row = $sth->fetchrow_array) {
+            $sub->(@row);
+        }
+    }
+    $sth->finish;
+}
+
+sub db_begin {
+    $dbh->begin_work if !$trxlevel++;
+}
+
+sub db_end {
+    $dbh->commit if !--$trxlevel;
+}
+
+sub db_transact(&) {
+    my ($sub) = @_;
+    my $ok;
+    eval {
+        db_begin();
+        $sub->();
+        db_end();
+        $ok = 1;
+    };
+    return if $ok;
+    my $errstr = $dbh->errstr // $@;
+    $dbh->rollback;
+    fatal "transaction failed: $errstr";
+}
+
+sub db_add_project {
+    my ($project) = @_;
+    return db_insert('projects', $project);
+}
+
+sub db_add_file_to_project {
+    my ($project, $file) = @_;
+    $file->{'project_id'} = $project->{'id'};
+    return db_insert('files', $file);
+}
+
+sub db_add_job_to_file {
+    my ($file, $job) = @_;
+    $job->{'file_id'} = $file->{'id'};
+    return db_insert('jobs', $job);
+}
+
+sub db_add_records_to_file {
+    my ($file, $fh, $commit_interval) = @_;
+    my $fid = $file->{'id'};
+    my $n = 0;
+    db_transact {
+        local $/ = '';
+        while (<$fh>) {
+            $n++;
+            my %record = ('file_id' => $fid);
+            my @fields;
+            my @lines = split /\n+/;
+            $record{'rec_num'} = shift @lines;
+            my $rid = db_insert('records', \%record);
+            foreach (@lines) {
+                /^(id|field)\s(\S+)\s(.+)$/ or next;
+                push @fields, {
+                    'record_id' => $rid,
+                    'indexed' => $1 eq 'id' ? 1 : 0,
+                    'field' => $2,
+                    'value' => $3,
+                };
+            }
+            db_insert('fields', @fields) if @fields;
+            if ($commit_interval && ($n % $commit_interval) == 0) {
+                db_end();
+                db_begin();
+            }
+        };
+    };
+    return $n;
+}
+
+sub db_insert {
+    my ($table, @rows, @cols, $commit_interval);
+    die "db_insert(): no table" if !@_;
+    $table = shift;
+    $commit_interval = pop() if ref($_[-1]) eq '';
+    die "db_insert(): no data" if !@_;
+    @cols = @{ pop() } if ref($_[-1]) eq 'ARRAY';
+    die "db_insert(): no data" if !@_;
+    @rows = @_;
+    @cols = sort keys %{ $rows[0] } if !@cols;
+    my $sql = sprintf 'INSERT INTO %s (%s) VALUES (%s)',
+        $table, join(',', @cols), join(',', map { '?' } @cols);
+    my $sth = $dbh->prepare($sql);
+    my @ids;
+    db_transact {
+        my $n = 0;
+        foreach my $row (@rows) {
+            $n++;
+            my $r = ref $row;
+            my @values;
+            if ($r eq 'CODE') {
+                my $hash = $row->() or last;
+                @values = @$hash{@cols};
+            }
+            elsif ($r eq 'HASH') {
+                @values = @$row{@cols};
+            }
+            $sth->execute(@values);
+            push @ids, $dbh->last_insert_id('', '', '', '');
+            if ($commit_interval && ($n % $commit_interval) == 0) {
+                db_end();
+                db_begin();
+            }
+        }
+        $sth->finish;
+    };
+    return if !@ids;
+    return wantarray ? @ids : $ids[-1];
+}
+
+sub norm {
+    local $_ = shift;
+    tr/-/_/;
+    return $_;
+}
+
+# db_insert('files', qw(foo bar baz), [1, 2, 3], [4, 5, 6]);
+# db_insert('files', qw(foo bar baz), {foo=> 1, bar=> 2, baz=>3}, {...});
+# db_insert('files', qw(foo bar baz), sub { ... });
+
+sub db_initialize {
+    init();
+    foreach my $table (tables()) {
+        my @sql = split /;\n\s*/, $table{$table}{'create'};
+        $dbh->do($_) for @sql;
+    }
+}
+
+# --- Other functions
+
+sub orient {
+    init();
+    my $db;
+    GetOptions(
+        'database|d=s' => \$db,
+        @_,
+    ) or usage;
+    $dbh ||= db_connect($db) if defined $db;
+}
+
+sub init {
+    $table{'projects'} = {
+        'columns' => [ qw(+id pkey|p name|n description|m status|s=new *added(i)) ],
+        'create' => q{
+            CREATE TABLE projects (
+                id          INTEGER PRIMARY KEY,
+                pkey        VARCHAR     NULL,  /* Any meaningful external key */
+                name        VARCHAR NOT NULL,
+                description VARCHAR     NULL,
+                status      VARCHAR     NULL,
+                added       INTEGER NOT NULL
+            );
+        },
+    };
+    $table{'files'} = {
+        'columns' => [ qw(+id -project|p fkey|f *name|n description|m status|s *purpose=add num-records(i)=0 md5sum *added(i)) ],
+        'create' => q{
+            CREATE TABLE files (
+                id          INTEGER PRIMARY KEY,
+                project_id  INTEGER NOT NULL REFERENCES projects(id),
+                fkey        VARCHAR     NULL,
+                name        VARCHAR NOT NULL,
+                description VARCHAR     NULL,
+                purpose     VARCHAR NOT NULL DEFAULT 'add',
+                num_records INTEGER NOT NULL DEFAULT 0,
+                md5sum      VARCHAR     NULL,
+                status      VARCHAR     NULL,
+                added       INTEGER NOT NULL
+            );
+        },
+    };
+    $table{'records'} = {
+        'columns' => [ qw(+id -file|f +file_id status|s=new *added(i)) ],
+        'create' => q{
+            CREATE TABLE records (
+                id          INTEGER PRIMARY KEY,
+                file_id     INTEGER NOT NULL REFERENCES files(id),
+                rec_num     INTEGER NOT NULL,
+                status      VARCHAR     NULL,
+                added       INTEGER NOT NULL
+            );
+        },
+    };
+    $table{'jobs'} = {
+        'columns' => [ qw(+id -file|f +file_id jkey|j *name|n description|m status|s=new purpose num-records(i)=0 range-begin|begin(i)=0 range-end|end(i)=0 *added(i)) ],
+        'create' => q{
+            CREATE TABLE jobs (
+                id          INTEGER PRIMARY KEY,
+                file_id     INTEGER NOT NULL REFERENCES files(id),
+                jkey        VARCHAR     NULL,
+                name        VARCHAR NOT NULL,
+                description VARCHAR     NULL,
+                purpose     VARCHAR NOT NULL DEFAULT 'add',
+                num_records INTEGER NOT NULL DEFAULT 0,
+                range_begin INTEGER NOT NULL,
+                range_end   INTEGER NOT NULL,
+                status      VARCHAR     NULL,
+                added       INTEGER NOT NULL
+            );
+        },
+    };
+    $table{'results'} = {
+        'columns' => [ qw(+id -job_id -record_id -match_id -action) ],
+        'create' => q{
+            CREATE TABLE results (
+                id          INTEGER PRIMARY KEY,
+                job_id      INTEGER NOT NULL REFERENCES jobs(id),
+                record_id   INTEGER NOT NULL REFERENCES records(id),
+                match_id    INTEGER     NULL REFERENCES records(id),
+                action      VARCHAR NOT NULL
+            );
+        },
+    },
+    $table{'matches'} = {
+        'columns' => [ qw(-result_id *match(i) *score(i)=1) ],
+        'create' => q{
+            CREATE TABLE matches (
+                match1_id   INTEGER     NULL REFERENCES fields(id),
+                match2_id   INTEGER     NULL REFERENCES fields(id),
+                score       INTEGER NOT NULL DEFAULT 1
+            );
+        },
+    },
+    $table{'fields'} = {
+        'columns' => [ qw(+id -record_id *indexed *field *value) ],
+        'create' => q{
+            CREATE TABLE fields (
+                id          INTEGER PRIMARY KEY,
+                record_id   INTEGER NOT NULL REFERENCES records(id),
+                field       VARCHAR NOT NULL,
+                value       VARCHAR     NULL,
+                indexed     INTEGER DEFAULT 0
+            );
+            CREATE INDEX fields_index_value ON fields (value) WHERE indexed = 1;
+        },
+    },
+}
+
+sub db_connect {
+    my ($db) = @_;
+    $dbh = DBI->connect("dbi:SQLite:dbname=$db", '', '', {
+        'FetchHashKeyName' => 'NAME_lc',
+        'RaiseError' => 1,
+    });
+}
+
+sub tables {
+    keys %table;
+}
+
+sub subcmd {
+    usage if !@ARGV;
+    my $subcmd = shift @ARGV;
+    my @caller = caller 1;
+    $caller[3] =~ /(cmd_\w+)$/ or die;
+    goto &{ __PACKAGE__->can($1.'_'.$subcmd) || usage };
+}
+
+sub dump_object {
+    my ($type, $obj) = @_;
+    print '@', $type, "\n";
+    foreach my $k (sort keys %$obj) {
+        my $v = $obj->{$k} // next;
+        print $k, ' ', $v, "\n";
+    }
+    print "\n";
+}
+
+sub parse_key {
+    local $_ = shift;
+    return ($1, $2) if /^([-\w]+):(.+)$/;
+    return ('id', $_) if /^[1-9][0-9]*$/;
+    usage "unparseable key: $_";
+}
+
+sub props2hash {
+    my %hash;
+    foreach (@_) {
+        usage if !/^(\w+)=(.*)$/;
+        usage "duplicate property: $_" if exists $hash{$1};
+        $hash{$1} = $2;
+    }
+    return \%hash;
+}
+
+sub usage {
+    print STDERR "usage: vbdb COMMAND [ARG...]\n";
+    exit 1;
+}
+
+sub warning {
+    print STDERR "vbdb: warning: @_\n";
+}
+
+sub fatal {
+    print STDERR "vbdb: @_\n";
+    exit 2;
+}
