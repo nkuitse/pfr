@@ -17,6 +17,7 @@ sub db_transact(&);
 sub orient;
 
 my ($dbh, %table, %object);
+my ($verbose, $plumbing);
 my $trxlevel = 0;
 
 @ARGV = qw(shell) if !@ARGV;
@@ -53,7 +54,7 @@ sub cmd_add_project {
     my $project = props2hash(@ARGV);
     db_transact {
         my $pid = db_add_project($project);
-        print STDERR "added: project $pid\n";
+        print STDERR $plumbing ? "$pid\n" : "added: project $pid\n";
     };
 }
 
@@ -65,7 +66,7 @@ sub cmd_add_file {
     my $file = props2hash(@ARGV);
     db_transact {
         my $fid = db_add_file_to_project($project, $file);
-        print STDERR "added: file $fid\n";
+        print STDERR $plumbing ? "$fid\n" : "added: file $fid\n";
     };
 }
 
@@ -78,7 +79,7 @@ sub cmd_add_job {
     my $job = props2hash(@ARGV);
     db_transact {
         my $jid = db_add_job_to_file($file, $job);
-        print STDERR "added: job $jid\n";
+        print STDERR $plumbing ? "$jid\n" : "added: job $jid\n";
     };
 }
 
@@ -96,7 +97,7 @@ sub cmd_add_records {
     my $file = file($project, shift @ARGV);
     db_transact {
         my $count = db_add_records_to_file($file, \*STDIN, $commit_interval);
-        print STDERR "added records ($count)\n";
+        print STDERR $plumbing ? "$count\n" : "added records ($count)\n";
     };
 }
 
@@ -114,7 +115,7 @@ sub cmd_add_matches {
     my $file = file($project, shift @ARGV);
     db_transact {
         my $count = db_add_matches_to_file($file, \*STDIN, $commit_interval);
-        print STDERR "added matches ($count)\n";
+        print STDERR $plumbing ? "$count\n" : "added matches ($count)\n";
     };
 }
 
@@ -364,7 +365,9 @@ sub orient {
     init();
     my $db;
     GetOptions(
-        'database|d=s' => \$db,
+        'v|verbose' => \$verbose,
+        'z|plumbing' => \$plumbing,
+        'd|database=s' => \$db,
         @_,
     ) or usage;
     $dbh ||= db_connect($db) if defined $db;
