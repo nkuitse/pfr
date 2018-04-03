@@ -135,7 +135,7 @@ sub cmd_dump_file {
     orient;
     usage if @ARGV != 2;
     my $project = project(shift @ARGV);
-    my $file = file($project, shift @ARGV);
+    my $file = project_file($project, shift @ARGV);
     dump_object('file' => $file);
 }
 
