@@ -75,7 +75,7 @@ sub cmd_add_job {
     orient;
     usage if @ARGV < 3;
     my $project = project(shift @ARGV);
-    my $file = file($project, shift @ARGV);
+    my $file = project_file($project, shift @ARGV);
     my $job = props2hash(@ARGV);
     db_transact {
         my $jid = db_add_job_to_file($file, $job);
@@ -94,7 +94,7 @@ sub cmd_add_records {
     );
     usage if @ARGV != 2;
     my $project = project(shift @ARGV);
-    my $file = file($project, shift @ARGV);
+    my $file = project_file($project, shift @ARGV);
     db_transact {
         my $count = db_add_records_to_file($file, \*STDIN, $commit_interval);
         print STDERR $plumbing ? "$count\n" : "added records ($count)\n";
@@ -112,7 +112,7 @@ sub cmd_add_matches {
     );
     usage if @ARGV != 2;
     my $project = project(shift @ARGV);
-    my $file = file($project, shift @ARGV);
+    my $file = project_file($project, shift @ARGV);
     db_transact {
         my $count = db_add_matches_to_file($file, \*STDIN, $commit_interval);
         print STDERR $plumbing ? "$count\n" : "added matches ($count)\n";
