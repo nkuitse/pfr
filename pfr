@@ -51,7 +51,6 @@ sub cmd_add_project {
     orient;
     usage if @ARGV < 1;
     my $project = props2hash(@ARGV);
-    $project->{'added'} //= time;
     db_transact {
         my $pid = db_add_project($project);
         print STDERR "added: project $pid\n";
@@ -135,7 +134,7 @@ sub cmd_dump_file {
     #@ dump project [-d DBFILE] PROJECT FILE :: dump metadata for a file
     orient;
     usage if @ARGV != 2;
-    my $project = db_project(shift @ARGV);
+    my $project = project(shift @ARGV);
     my $file = file($project, shift @ARGV);
     dump_object('file' => $file);
 }
@@ -252,12 +251,14 @@ sub db_transact(&) {
 
 sub db_add_project {
     my ($project) = @_;
+    $project->{'added'} //= time;
     return db_insert('projects', $project);
 }
 
 sub db_add_file_to_project {
     my ($project, $file) = @_;
     $file->{'project_id'} = $project->{'id'};
+    $file->{'added'} //= time;
     return db_insert('files', $file);
 }
 
