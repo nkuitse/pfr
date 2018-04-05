@@ -19,6 +19,7 @@ sub orient;
 my ($dbh, %table, %object);
 my ($verbose, $plumbing);
 my $trxlevel = 0;
+my $now = time;
 
 @ARGV = qw(shell) if !@ARGV;
 my $cmd = norm(shift @ARGV);
@@ -84,7 +85,7 @@ sub cmd_add_job {
 }
 
 sub cmd_add_records {
-    #@ add records [-d DBFILE] [-m INTERVAL] [-i INFILE] PROJECT FILE :: add records
+    #@ add records [-d DBFILE] [-n NUM] [-m INTERVAL] [-i INFILE] PROJECT FILE :: add records
     my ($first_number, $commit_interval) = (1, undef);
     orient(
         'n|first-number=i' => \$first_number,
@@ -253,14 +254,14 @@ sub db_transact(&) {
 
 sub db_add_project {
     my ($project) = @_;
-    $project->{'added'} //= time;
+    $project->{'added'} //= $now;
     return db_insert('projects', $project);
 }
 
 sub db_add_file_to_project {
     my ($project, $file) = @_;
     $file->{'project_id'} = $project->{'id'};
-    $file->{'added'} //= time;
+    $file->{'added'} //= $now;
     return db_insert('files', $file);
 }
 
@@ -278,16 +279,16 @@ sub db_add_records_to_file {
         local $/ = '';
         while (<$fh>) {
             $n++;
-            my %record = ('file_id' => $fid);
+            my %record = ('file_id' => $fid, 'added' => $now);
             my @fields;
             my @lines = split /\n+/;
             $record{'rec_num'} = shift @lines;
             my $rid = db_insert('records', \%record);
             foreach (@lines) {
-                /^(id|field)\s(\S+)\s(.+)$/ or next;
+                /^(index|field)\s(\S+)\s(.+)$/ or next;
                 push @fields, {
                     'record_id' => $rid,
-                    'indexed' => $1 eq 'id' ? 1 : 0,
+                    'indexed' => $1 eq 'index' ? 1 : 0,
                     'field' => $2,
                     'value' => $3,
                 };
@@ -467,7 +468,7 @@ sub init {
                 value       VARCHAR     NULL,
                 indexed     INTEGER DEFAULT 0
             );
-            CREATE INDEX fields_index_value ON fields (value) WHERE indexed = 1;
+            CREATE INDEX fields_index_value ON fields (value);
         },
     },
 }
