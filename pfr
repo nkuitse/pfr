@@ -8,8 +8,6 @@ sub warning;
 sub fatal;
 
 use DBI;
-use Digest;
-use MARC::Loop qw(marcparse TAG VALREF);
 use Getopt::Long
     qw(:config posix_default gnu_compat require_order bundling no_ignore_case);
 
